@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -15,22 +17,41 @@ import (
 )
 
 func main() {
+	srcAddr := flag.String("srcAddr", "127.0.0.1", "srcAddr")
+	srcPort := flag.Int("srcPort", 4444, "srcPort")
 	dstAddr := flag.String("dstAddr", "", "dstAddr")
 	dstPort := flag.Int("dstPort", 22, "dstPort")
-	//dstUser := flag.String("dstUser", "root", "dstUser")
-	//dstPass := flag.String("dstPass", "", "dstPass")
 
 	flag.Parse()
 
-	conn, err := toGate(*dstAddr, uint16(*dstPort))
+	// 读A
+	listenAddr := fmt.Sprintf("%s:%d", *srcAddr, *srcPort)
+	log.Println("listen address is:", listenAddr)
+
+	listen, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		log.Fatalf("%+v", xerrors.Errorf("dial to gateway failed: %w", err))
+		log.Printf("%+v", xerrors.Errorf("listen failed: %w", err))
+		return
 	}
-	defer conn.Close()
-	log.Println("dial to gateway ok")
+
+	for {
+		listener, err := listen.Accept()
+		if err != nil {
+			log.Fatalf("%+v", xerrors.Errorf("accept failed: %w", err))
+		}
+		log.Println(listener.LocalAddr(), " listen from ", listener.RemoteAddr())
+
+		conn, err := toGate(*dstAddr, uint16(*dstPort))
+		if err != nil {
+			log.Fatalf("%+v", xerrors.Errorf("dial to gateway failed: %w", err))
+		}
+		log.Println("dial to gateway ok")
+
+		go forward(conn, listener)
+		go forward(listener, conn)
+	}
 
 	// command input to dst
-	conn
 }
 
 func toGate(dstAddr string, dstPort uint16) (conn net.Conn, err error) {
@@ -117,4 +138,14 @@ func toDst(conn *bufio.Writer, dstAddr string, dstPort uint16) (err error) {
 	binary.Write(port, binary.BigEndian, dstPort)
 	_, _ = w.Write(port.Bytes())
 	return nil
+}
+
+func forward(conn1 net.Conn, conn2 net.Conn) {
+	defer conn1.Close()
+	defer conn2.Close()
+
+	_, err := io.Copy(conn1, conn2)
+	if err != nil {
+		log.Printf("%+v", xerrors.Errorf("conn2 copy to conn1 failed: %w", err))
+	}
 }

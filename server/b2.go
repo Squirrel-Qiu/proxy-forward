@@ -42,8 +42,6 @@ func main() {
 }
 
 func handleConn(conn net.Conn) {
-	defer conn.Close()
-
 	r := bufio.NewReader(conn)
 
 	err := handShake(r, conn)
