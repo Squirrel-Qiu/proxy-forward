@@ -3,17 +3,38 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
-	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"net"
+	"strconv"
 
 	"golang.org/x/xerrors"
 
 	"proxy-forward/serverConf"
 )
+
+type cmd = uint8
+
+const (
+	cmdVerify cmd = 6
+	cmdConn   cmd = 7
+)
+
+type typeAddress = uint8
+
+const (
+	TypeIPv4 typeAddress = 1
+	TypeIPv6 typeAddress = 2
+	TypeDomain typeAddress = 3
+)
+
+type Address struct {
+	Type typeAddress
+	IP net.IP
+	Host string
+	Port uint16
+}
 
 func main() {
 	srcAddr := flag.String("srcAddr", "0.0.0.0", "src addr")
@@ -21,7 +42,7 @@ func main() {
 
 	flag.Parse()
 
-	listenAddr := fmt.Sprintf("%s:%d", *srcAddr, *srcPort)
+	listenAddr := net.JoinHostPort(*srcAddr, strconv.Itoa(*srcPort))
 	log.Println("listen address is:", listenAddr)
 
 	listen, err := net.Listen("tcp", listenAddr)
@@ -44,18 +65,22 @@ func main() {
 func handleConn(conn net.Conn) {
 	r := bufio.NewReader(conn)
 
-	err := handShake(r, conn)
+	_, err := VerifyClient(conn)
 	if err != nil {
 		log.Fatalf("%+v", xerrors.Errorf("shake hand failed: %w", err))
 	}
 
-	addr, err := readAddr(r)
+	log.Println("the client is valid, verified by the gateway")
+
+	addr, err := readAddr(conn)
 	if err != nil {
 		log.Fatalf("%+v", xerrors.Errorf("read dst address failed: %w", err))
 	}
-	log.Println("start connect to dst ", addr)
 
-	remote, err := net.Dial("tcp", addr)
+	dstAddr := addr.String()
+	log.Println("start connect to dst ", dstAddr)
+
+	remote, err := net.Dial("tcp", dstAddr)
 	if err != nil {
 		// conn2' may have 'nil' or other unexpected value as its corresponding error variable may be not 'nil'
 		log.Printf("%+v", xerrors.Errorf("dial to remote failed: %w", err))
@@ -63,77 +88,108 @@ func handleConn(conn net.Conn) {
 		return
 	}
 
-	//wg := new(sync.WaitGroup)
-	//wg.Add(2)
-
 	go forward(remote, conn)
 	go forward(conn, remote)
 }
 
-func handShake(r *bufio.Reader, conn net.Conn) error {
+func VerifyClient(conn net.Conn) (bool, error) {
 	userName, password := serverConf.ConfOfB2()
+	log.Println("read the gateway configuration and start to verify visitors")
 
-	verifyBuff := make([]byte, 6)
-	_, _ = r.Read(verifyBuff)
-
-	if string(verifyBuff) != "Verify" {
-		return errors.New("not verification information")
+	b := make([]byte, 1)
+	_, err := conn.Read(b)
+	if err != nil {
+		return false, xerrors.Errorf("read verification identifier from io.Reader failed: %w", err)
 	}
 
-	uLen, _ := r.ReadByte()
-	log.Printf("userName length: %d", uLen)
-	userBuff := make([]byte, uLen)
-	_, _ = r.Read(userBuff)
+	if b[0] != cmdVerify {
+		return false, xerrors.New("it is not verification message")
+	}
 
-	pLen, _ := r.ReadByte()
-	log.Printf("password length: %d", pLen)
-	passBuff := make([]byte, pLen)
-	_, _ = r.Read(passBuff)
+	// username
+	if _, err := conn.Read(b); err != nil {
+		return false, xerrors.Errorf("read username length from io.Reader failed: %w", err)
+	}
+
+	userBuff := make([]byte, b[0])
+	if _, err := io.ReadFull(conn, userBuff); err != nil {
+		return false, xerrors.Errorf("read username from io.Reader failed: %w", err)
+	}
+
+	// password
+	if _, err := conn.Read(b); err != nil {
+		return false, xerrors.Errorf("read password length from io.Reader failed: %w", err)
+	}
+
+	passBuff := make([]byte, b[0])
+	if _, err := io.ReadFull(conn, passBuff); err != nil {
+		return false, xerrors.Errorf("read password from io.Reader failed: %w", err)
+	}
 
 	if string(userBuff) == userName && string(passBuff) == password {
-		_, _ = conn.Write([]byte{0})
-	} else {
-		_, _ = conn.Write([]byte{1})
-		return xerrors.New("connection verification failed")
+		_, _ = conn.Write([]byte{})
+		return true, nil
 	}
-	return nil
+
+	return false, xerrors.New("verify client failed")
 }
 
-func readAddr(r *bufio.Reader) (addr string, err error) {
-	connBuff := make([]byte, 4)
-	_, _ = r.Read(connBuff)
-
-	if string(connBuff) != "CONN" {
-		return addr, errors.New("not connection information")
+func readAddr(r io.Reader) (Address, error) {
+	connBuff := make([]byte, 1)
+	if _, err := r.Read(connBuff); err != nil {
+		return Address{}, xerrors.Errorf("read dst address: read cmdConn from io.Reader failed: %w", err)
 	}
 
-	typeAddr, _ := r.ReadByte()
-	log.Printf("connection type (0-domain 1-ipv4 2-ipv6): %d", typeAddr)
-
-	// 0-domain  1-ipv4  2-ipv6
-	switch {
-	case typeAddr == 0:
-		dLen, _ := r.ReadByte()
-		log.Printf("domain length: %d", dLen)
-		domainBuff := make([]byte, dLen)
-		_, _ = r.Read(domainBuff)
-
-	case typeAddr == 1:
-		ipv4Buff := make([]byte, 16)
-		_, _ = r.Read(ipv4Buff)
-		addr = net.IPv4(ipv4Buff[12], ipv4Buff[13], ipv4Buff[14], ipv4Buff[15]).String()
-
-	case typeAddr == 2:
-		ipv6Buff := make([]byte, 16)
-		_, _ = r.Read(ipv6Buff)
-		addr = (net.IP)(ipv6Buff).String()
+	if connBuff[0] != cmdConn {
+		return Address{}, xerrors.New("it is not cmdConn(dstAddr) message")
 	}
 
-	var port uint16
-	binary.Read(r, binary.BigEndian, &port)
+	if _, err := r.Read(connBuff); err != nil {
+		return Address{}, xerrors.Errorf("read dst address: read addr type from io.Reader failed: %w", err)
+	}
 
-	addr = fmt.Sprintf("%v:%d", addr, port)
-	return addr, nil
+	var address Address
+
+	var b []byte
+	switch connBuff[0] {
+	case TypeIPv4:
+		b = make([]byte, net.IPv4len+2)
+		if _, err := io.ReadFull(r, b); err != nil {
+			return Address{}, xerrors.Errorf("read dst address: read ipv4 addr from io.Reader failed: %w", err)
+		}
+
+		address.IP = b[:net.IPv4len]
+
+	case TypeIPv6:
+		b = make([]byte, net.IPv6len+2)
+		if _, err := io.ReadFull(r, b); err != nil {
+			return Address{}, xerrors.Errorf("read dst address: read ipv4 addr from io.Reader failed: %w", err)
+		}
+
+		address.IP = b[:net.IPv6len]
+
+	case TypeDomain:
+		domainLen := make([]byte, 1)
+		if _, err := r.Read(domainLen); err != nil {
+			return Address{}, xerrors.Errorf("read dst address: read domain length from io.Reader failed: %w", err)
+		}
+
+		b = make([]byte, domainLen[0]+2)
+		if _, err := io.ReadFull(r, b); err != nil {
+			return Address{}, xerrors.Errorf("read dst address: read domain from io.Reader failed: %w", err)
+		}
+
+		l := domainLen[0]
+		address.Host = string(b[:l])
+		b = b[l:]
+
+	default:
+		return Address{}, xerrors.New("read invalid address type")
+	}
+
+	address.Port = binary.BigEndian.Uint16(b)
+
+	return address, nil
 }
 
 func forward(conn1 net.Conn, conn2 net.Conn) {
@@ -143,5 +199,18 @@ func forward(conn1 net.Conn, conn2 net.Conn) {
 	_, err := io.Copy(conn1, conn2)
 	if err != nil {
 		log.Printf("%+v", xerrors.Errorf("conn2 copy to conn1 failed: %w", err))
+	}
+}
+
+func (address Address) String() string {
+	switch address.Type {
+	case TypeIPv4, TypeIPv6:
+		return net.JoinHostPort(address.IP.String(), strconv.Itoa(int(address.Port)))
+
+	case TypeDomain:
+		return net.JoinHostPort(address.Host, strconv.Itoa(int(address.Port)))
+
+	default:
+		return ""
 	}
 }
