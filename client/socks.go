@@ -7,7 +7,7 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"proxy-forward/conf"
+	"github.com/Squirrel-Qiu/proxy-forward/conf"
 )
 
 type ResponseType = uint8
@@ -46,18 +46,30 @@ func NewSocks(listener net.Conn, auth Authentication) (net.Conn, error) {
 	// 3.
 	dstAddr, err := socksServer.ReadDstAddr()
 	if err != nil {
-		log.Fatalf("%+v", xerrors.Errorf("read dst address from A failed: %w", err))
+		return nil, xerrors.Errorf("read dst address from A failed: %w", err)
 	}
 
 	conn, err := toGate()
 	if err != nil {
-		log.Fatalf("%+v", xerrors.Errorf("dial to gateway failed: %w", err))
+		return nil, xerrors.Errorf("dial to gateway failed: %w", err)
 	}
 	log.Println("dial to gateway ok")
 
 	// 7.
 	if _, err = conn.Write(dstAddr); err != nil {
-		log.Fatalf("%+v", xerrors.Errorf("write dst address to gate failed: %w", err))
+		return nil, xerrors.Errorf("write dst address to gate failed: %w", err)
+	}
+
+	// 8. receive reply  [VER | REP |  RSV  | TYPE | BND.ADDR | BND.PORT]
+	reply, err := handleReply(conn)
+	if err != nil {
+		return nil, xerrors.Errorf("receive reply from gateway failed: %w", err)
+	}
+
+	// 9. to A
+	_, err = listener.Write(reply)
+	if err != nil {
+		return nil, xerrors.Errorf("write reply to A failed: %w", err)
 	}
 
 	return conn, nil
@@ -148,18 +160,67 @@ func toGate() (conn net.Conn, err error) {
 
 // [Version 1 byte | uLen 1 byte | username 1-255 byte | pLen 1 byte | pass 1-255 byte]
 func Encrypt(username, password string) []byte {
+	ver := []byte{Version}
+
 	user := []byte(username)
 	pass := []byte(password)
 	uL := len(user)
 	pL := len(pass)
 
-	token := make([]byte, 3+uL+pL)
+	token := make([]byte, 0)
 
-	token = append(token, Version)
 	token = append(token, byte(uL))
 	token = append(token, user...)
 	token = append(token, byte(pL))
 	token = append(token, pass...)
 
+	token = append(ver, token...)
 	return token
+}
+
+func handleReply(conn net.Conn) ([]byte, error) {
+	resp := make([]byte, 4)
+
+	_, err := io.ReadFull(conn, resp)
+	if err != nil {
+		return nil, xerrors.Errorf("read version failed: %w", err)
+	}
+
+	if resp[0] != Version {
+		return nil, xerrors.Errorf("reply version wrong: %w", VersionErr{conn.RemoteAddr(), resp[0]})
+	}
+
+	if resp[1] != Success {
+		return nil, xerrors.Errorf("reply's response not success, is %d", resp[1])
+	}
+
+	var b []byte
+	switch resp[3] {
+	case TypeIPv4:
+		b = make([]byte, net.IPv4len+2)
+		if _, err := io.ReadFull(conn, b); err != nil {
+			return nil, xerrors.Errorf("read ipv4 addr from dst failed: %w", err)
+		}
+
+	case TypeIPv6:
+		b = make([]byte, net.IPv6len+2)
+		if _, err := io.ReadFull(conn, b); err != nil {
+			return nil, xerrors.Errorf("read ipv6 addr from dst failed: %w", err)
+		}
+
+	case TypeDomain:
+		domainLen := make([]byte, 1)
+		if _, err := conn.Read(domainLen); err != nil {
+			return nil, xerrors.Errorf("read domain name length from dst failed: %w", err)
+		}
+
+		b = make([]byte, domainLen[0]+2)
+		if _, err := io.ReadFull(conn, b); err != nil {
+			return nil, xerrors.Errorf("read domain name from dst failed: %w", err)
+		}
+	}
+
+	b = append(resp, b...)
+
+	return b, nil
 }

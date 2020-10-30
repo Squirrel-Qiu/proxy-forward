@@ -1,4 +1,4 @@
-module proxy-forward
+module github.com/Squirrel-Qiu/proxy-forward
 
 go 1.15
 

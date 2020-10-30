@@ -6,7 +6,7 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"proxy-forward/serverConf"
+	"github.com/Squirrel-Qiu/proxy-forward/serverConf"
 )
 
 type AuthType = uint8
@@ -42,8 +42,8 @@ func (WayAuth) DecryptAuth(u, p []byte) bool {
 	userName, password := serverConf.ConfOfB2()
 	log.Println("read the gateway configuration and start to verify visitors")
 
-	if string(u) == userName && string(p) == password {
-		log.Println("decrypt username and password pass")
+	if string(u[:]) == userName && string(p[:]) == password {
+		log.Println("decrypt username and password is consistent")
 		return true
 	}
 

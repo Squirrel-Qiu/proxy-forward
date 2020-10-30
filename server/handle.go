@@ -38,7 +38,6 @@ func handleConn(listener net.Conn, auth Authentication) {
 		Address{},
 	}
 
-	//
 	// 4.negotiation Version
 	err := socksServer.init()
 	if err != nil {

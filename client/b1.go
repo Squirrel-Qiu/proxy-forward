@@ -29,7 +29,7 @@ func main() {
 	for {
 		listener, err := listen.Accept()
 		if err != nil {
-			log.Fatalf("%+v", xerrors.Errorf("accept failed: %w", err))
+			log.Printf("%+v", xerrors.Errorf("accept failed: %w", err))
 		}
 		log.Println(listener.LocalAddr(), " listen from ", listener.RemoteAddr())
 
@@ -37,6 +37,7 @@ func main() {
 		remote, err := NewSocks(listener, WayAuth{})
 		if err != nil {
 			_ = remote.Close()
+			log.Fatalf("%+v", err)
 		}
 
 		go forward(remote, listener)
